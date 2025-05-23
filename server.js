@@ -1,9 +1,18 @@
-// server.js — Stripe Webhooks + Purchase Endpoint
+// server.js — Stripe Webhooks + Purchase Endpoint + Firebase Admin Wallet Update
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const bodyParser = require('body-parser');
+const admin = require('firebase-admin');
+
+const serviceAccount = require('./serviceAccountKey.json');
+
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount)
+});
+
+const firestore = admin.firestore();
 
 const app = express();
 app.use(cors());
@@ -37,7 +46,7 @@ app.post('/api/purchase-coins', async (req, res) => {
   }
 });
 
-// 🧠 Webhook endpoint
+// 🧠 Stripe Webhook Endpoint
 app.post('/webhook', bodyParser.raw({ type: 'application/json' }), (req, res) => {
   const sig = req.headers['stripe-signature'];
   let event;
@@ -57,15 +66,25 @@ app.post('/webhook', bodyParser.raw({ type: 'application/json' }), (req, res) =>
   if (event.type === 'payment_intent.succeeded') {
     const paymentIntent = event.data.object;
     const userId = paymentIntent.metadata.userId;
-    const amount = paymentIntent.metadata.amount;
+    const amount = Number(paymentIntent.metadata.amount);
 
     console.log(`💰 Payment succeeded for ${userId} — $${amount}`);
-    // TODO: Update Firebase user wallet here
+
+    // ✅ Update Firebase Firestore wallet balance
+    firestore.collection('wallets').doc(userId).set({
+      balance: admin.firestore.FieldValue.increment(amount),
+      lastUpdated: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true }).then(() => {
+      console.log(`🟢 Wallet updated for ${userId}`);
+    }).catch((err) => {
+      console.error(`❌ Firestore update failed for ${userId}:`, err.message);
+    });
   }
 
   res.json({ received: true });
 });
 
+// 🟢 Start Server
 const PORT = process.env.PORT || 5001;
 app.listen(PORT, () => {
   console.log(`🔥 Backend running on http://localhost:${PORT}`);
