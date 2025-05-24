@@ -6,6 +6,7 @@ const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const bodyParser = require('body-parser');
 const admin = require('firebase-admin');
 
+// 🔐 Parse Firebase Service Account JSON from ENV
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
 
 admin.initializeApp({
@@ -13,8 +14,10 @@ admin.initializeApp({
 });
 
 const firestore = admin.firestore();
-
 const app = express();
+
+// ⚠️ Use raw bodyParser for Stripe Webhook before JSON middleware
+app.use('/webhook', bodyParser.raw({ type: 'application/json' }));
 app.use(cors());
 app.use(express.json());
 
@@ -23,7 +26,7 @@ app.get('/api/ping', (req, res) => {
   res.send('pong');
 });
 
-// 💸 Coin purchase - creates payment intent
+// 💸 Create PaymentIntent
 app.post('/api/purchase-coins', async (req, res) => {
   const { amount, userId } = req.body;
 
@@ -35,19 +38,20 @@ app.post('/api/purchase-coins', async (req, res) => {
     const paymentIntent = await stripe.paymentIntents.create({
       amount: amount * 100,
       currency: 'usd',
-      metadata: { userId, amount },
+      metadata: { userId, amount }
     });
 
-    console.log(`✅ [Stripe] Intent created: $${amount} for ${userId}`);
+    console.log(`✅ Stripe intent created: $${amount} for ${userId}`);
     res.send({ clientSecret: paymentIntent.client_secret });
+
   } catch (err) {
     console.error('❌ Stripe error:', err.message);
     res.status(500).send({ error: err.message });
   }
 });
 
-// 🧠 Stripe Webhook Endpoint
-app.post('/webhook', bodyParser.raw({ type: 'application/json' }), (req, res) => {
+// 🧠 Webhook: Confirm & Update Wallet
+app.post('/webhook', (req, res) => {
   const sig = req.headers['stripe-signature'];
   let event;
 
@@ -58,33 +62,34 @@ app.post('/webhook', bodyParser.raw({ type: 'application/json' }), (req, res) =>
       process.env.STRIPE_WEBHOOK_SECRET
     );
   } catch (err) {
-    console.error('❌ Webhook signature error:', err.message);
+    console.error('❌ Webhook signature invalid:', err.message);
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
-  // ✅ Handle successful payment
   if (event.type === 'payment_intent.succeeded') {
     const paymentIntent = event.data.object;
     const userId = paymentIntent.metadata.userId;
     const amount = Number(paymentIntent.metadata.amount);
 
-    console.log(`💰 Payment succeeded for ${userId} — $${amount}`);
+    console.log(`💰 Payment succeeded for ${userId}: +$${amount}`);
 
-    // ✅ Update Firebase Firestore wallet balance
+    // Update Firestore Wallet
     firestore.collection('wallets').doc(userId).set({
       balance: admin.firestore.FieldValue.increment(amount),
       lastUpdated: admin.firestore.FieldValue.serverTimestamp()
-    }, { merge: true }).then(() => {
-      console.log(`🟢 Wallet updated for ${userId}`);
-    }).catch((err) => {
-      console.error(`❌ Firestore update failed for ${userId}:`, err.message);
-    });
+    }, { merge: true })
+      .then(() => {
+        console.log(`🟢 Wallet updated for ${userId}`);
+      })
+      .catch((err) => {
+        console.error(`❌ Firestore update failed for ${userId}:`, err.message);
+      });
   }
 
   res.json({ received: true });
 });
 
-// 🟢 Start Server
+// 🔥 Start Server
 const PORT = process.env.PORT || 5001;
 app.listen(PORT, () => {
   console.log(`🔥 Backend running on http://localhost:${PORT}`);
